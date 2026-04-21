@@ -37,7 +37,7 @@ def _determine_spread(bias: str, vix_mode: str, strategy_set: str) -> str:
     return "NO_TRADE"
 
 
-def run(poc_level: float = 0.0, mock_vix: float | None = None) -> dict:
+def run(poc_level: float = 0.0, mock_vix=None) -> dict:
     """
     Args:
         poc_level: Point of Control price level for orderflow scorer.
@@ -182,7 +182,7 @@ def _write(result: dict):
     if result["reason"]:
         print(f"  REASON  : {result['reason']}")
     print(f"{'='*50}")
-    print(f"Written → {OUTPUT_FILE}")
+    print(f"Written -> {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":

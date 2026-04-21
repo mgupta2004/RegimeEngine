@@ -18,7 +18,7 @@ kite = KiteConnect(api_key=API_KEY)
 kite.set_access_token(ACCESS_TOKEN)
 
 # ── Instrument helpers ────────────────────────────────────────────────────────
-_nfo_cache: list | None = None
+_nfo_cache = None  # type: list
 
 def _get_nfo_instruments() -> list:
     global _nfo_cache
@@ -28,12 +28,20 @@ def _get_nfo_instruments() -> list:
 
 
 def _nearest_weekly_expiry() -> date:
-    """Return the nearest Thursday expiry on or after today."""
+    """Return nearest active Nifty weekly expiry from the instruments list."""
+    instruments = _get_nfo_instruments()
     today = date.today()
-    days_ahead = (3 - today.weekday()) % 7  # 3 = Thursday
-    if days_ahead == 0 and today.weekday() == 3:
-        days_ahead = 0
-    return today + timedelta(days=days_ahead)
+    expiries = sorted({
+        i["expiry"] for i in instruments
+        if i["name"] == "NIFTY"
+        and i["instrument_type"] in ("CE", "PE")
+        and i["expiry"] >= today
+    })
+    if not expiries:
+        raise RuntimeError("No upcoming Nifty option expiries found in NFO instruments")
+    # Pick the nearest weekly expiry (≤7 days out); fall back to first available
+    weekly = [e for e in expiries if (e - today).days <= 7]
+    return weekly[0] if weekly else expiries[0]
 
 
 def _get_nifty_option_strikes(expiry: date) -> list:
@@ -51,25 +59,26 @@ def _fetch_oi_snapshot(option_strikes: list) -> dict:
     """
     Fetch LTP + OI for all strikes.
     Returns: {strike: {"CE": {ltp, oi}, "PE": {ltp, oi}}}
+    Uses kite.quote() (not ltp) because ltp() does not return OI.
     """
     tokens = [f"NFO:{i['tradingsymbol']}" for i in option_strikes]
-    # Kite ltp() accepts max 500 symbols; Nifty option chain is ~100-200 strikes
-    chunk_size = 400
-    ltp_data = {}
+    # kite.quote() accepts max 500 symbols per call
+    chunk_size = 500
+    quote_data = {}
     for i in range(0, len(tokens), chunk_size):
-        ltp_data.update(kite.ltp(tokens[i:i + chunk_size]))
+        quote_data.update(kite.quote(tokens[i:i + chunk_size]))
 
     chain: dict = {}
     for instrument in option_strikes:
         sym = f"NFO:{instrument['tradingsymbol']}"
-        quote = ltp_data.get(sym, {})
+        q = quote_data.get(sym, {})
         strike = instrument["strike"]
         opt_type = instrument["instrument_type"]  # CE or PE
         if strike not in chain:
             chain[strike] = {}
         chain[strike][opt_type] = {
-            "ltp": quote.get("last_price", 0),
-            "oi":  quote.get("oi", 0),
+            "ltp": q.get("last_price", 0),
+            "oi":  q.get("oi", 0),
         }
     return chain
 
@@ -139,6 +148,7 @@ def get_oi_levels(vix_mode: str = "NORMAL", bias_hint: str = "SKIP",
     """
     expiry = _nearest_weekly_expiry()
     strikes = _get_nifty_option_strikes(expiry)
+    print(f"[L2] expiry={expiry}  strikes_found={len(strikes)}")
     if not strikes:
         return {"error": f"No option data for expiry {expiry}", "score": 0.0}
 

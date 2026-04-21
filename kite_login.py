@@ -35,18 +35,17 @@ load_dotenv(ENV_FILE)
 #     set_key(ENV_FILE, "KITE_API_KEY", API_KEY)
 
 
-api_key = os.environ.get("api_key", "")
-api_secret = os.environ.get("api_secret", "")
-user_id = os.environ.get("user_id", "")
-user_password = os.environ.get("user_password", "")
-totp_key = os.environ.get("totp_key", "")
+api_key = os.environ.get("KITE_API_KEY", "")
+api_secret = os.environ.get("KITE_API_SECRET", "")
+user_id = os.environ.get("KITE_USER_ID", "")
+user_password = os.environ.get("KITE_USER_PASSWORD", "")
+totp_key = os.environ.get("KITE_TOTP_KEY", "")
 
-print(api_key, api_secret, user_id, user_password, totp_key)
-print(pyotp.TOTP(totp_key).now())
+
 kite = login()
 
 access_token = kite.access_token
-print(access_token)
+#print(access_token)
 
 # kite = KiteConnect(api_key=API_KEY)
 # login_url = kite.login_url()

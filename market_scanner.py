@@ -11,6 +11,8 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 API_KEY     = os.environ.get("KITE_API_KEY", "")
 ACCESS_TOKEN = os.environ.get("KITE_ACCESS_TOKEN", "")
 
+print(API_KEY, ACCESS_TOKEN)
+
 IST = pytz.timezone("Asia/Kolkata")
 
 kite = KiteConnect(api_key=API_KEY)
@@ -102,6 +104,9 @@ def fetch_ohlcv(symbol: str, interval: str, candles: int) -> pd.DataFrame:
 
 # ── IB Classification ─────────────────────────────────────────────────────────
 def classify_ib(df_15min: pd.DataFrame) -> dict:
+    if df_15min.empty or "date" not in df_15min.columns:
+        return {"status": "NO_DATA_TODAY"}
+
     now_ist = datetime.now(IST)
     today = now_ist.date()
 

@@ -23,27 +23,55 @@ API_KEY      = os.environ.get("KITE_API_KEY", "")
 ACCESS_TOKEN = os.environ.get("KITE_ACCESS_TOKEN", "")
 
 IST = pytz.timezone("Asia/Kolkata")
-NIFTY_TOKEN = 256265  # static, never changes
+
+def _resolve_nifty_futures_token() -> int:
+    """Return instrument token for the nearest Nifty futures contract."""
+    from datetime import date
+    kite_tmp = KiteConnect(api_key=API_KEY)
+    kite_tmp.set_access_token(ACCESS_TOKEN)
+    instruments = kite_tmp.instruments("NFO")
+    futures = [
+        i for i in instruments
+        if i["name"] == "NIFTY"
+        and i["instrument_type"] == "FUT"
+        and i["expiry"] >= date.today()
+    ]
+    if not futures:
+        raise RuntimeError("No active Nifty futures found in NFO instruments")
+    futures.sort(key=lambda x: x["expiry"])
+    token = futures[0]["instrument_token"]
+    print(f"[Orderflow] Nifty futures token: {token}  ({futures[0]['tradingsymbol']})")
+    return token
 
 # ── Tick State ────────────────────────────────────────────────────────────────
 class OrderflowState:
     def __init__(self, window_minutes: int = 15):
         self.window = timedelta(minutes=window_minutes)
         # Each entry: (timestamp, delta_volume, direction)
-        # direction: +1 = buy tick, -1 = sell tick
+        # direction: +1 = buy tick (uptick), -1 = sell tick (downtick)
         self._ticks: deque = deque()
         self._lock = threading.Lock()
         self.spot = 0.0
         self.poc  = 0.0   # Point of Control (price level with most volume today)
+        self._last_price = 0.0  # for uptick/downtick rule
+        self._last_direction = 1
 
     def on_tick(self, tick: dict):
         ts = datetime.now(IST)
         price = tick.get("last_price", 0)
         qty   = tick.get("last_quantity", 0)
-        # Kite tick: buy_quantity > sell_quantity → aggressive buy
-        buy_qty  = tick.get("buy_quantity", 0)
-        sell_qty = tick.get("sell_quantity", 0)
-        direction = 1 if buy_qty >= sell_qty else -1
+
+        # Uptick/downtick rule: compare to previous traded price
+        # buy_quantity/sell_quantity are order book depth — not aggressor side
+        if price > self._last_price:
+            direction = 1
+        elif price < self._last_price:
+            direction = -1
+        else:
+            direction = self._last_direction  # tick rule: carry forward
+
+        self._last_price = price
+        self._last_direction = direction
 
         with self._lock:
             self._ticks.append((ts, qty * direction, direction))
@@ -120,21 +148,23 @@ class OrderflowState:
 
 # Singleton state shared between ticker callbacks and signal engine
 _state = OrderflowState(window_minutes=15)
-_ticker: KiteTicker | None = None
+_ticker = None  # type: KiteTicker
+_nifty_token = None  # resolved at start_ticker time
 
 
 def _start_ticker():
-    global _ticker
+    global _ticker, _nifty_token
+    _nifty_token = _resolve_nifty_futures_token()
     _ticker = KiteTicker(API_KEY, ACCESS_TOKEN)
 
     def on_ticks(ws, ticks):
         for tick in ticks:
-            if tick["instrument_token"] == NIFTY_TOKEN:
+            if tick["instrument_token"] == _nifty_token:
                 _state.on_tick(tick)
 
     def on_connect(ws, response):
-        ws.subscribe([NIFTY_TOKEN])
-        ws.set_mode(ws.MODE_FULL, [NIFTY_TOKEN])
+        ws.subscribe([_nifty_token])
+        ws.set_mode(ws.MODE_FULL, [_nifty_token])
 
     def on_error(ws, code, reason):
         print(f"[KiteTicker] Error {code}: {reason}")
