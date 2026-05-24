@@ -3,7 +3,7 @@
 Classifies day-type from IB data and determines which strategy set is authorized.
 Must be called after 10:15 IST when IB is frozen.
 """
-from market_scanner import fetch_ohlcv, classify_ib
+from data.kite_client import fetch_ohlcv, classify_ib
 
 
 def get_market_profile() -> dict:
@@ -18,7 +18,7 @@ def get_market_profile() -> dict:
     df_15min = fetch_ohlcv("NSE:NIFTY 50", "15minute", 50)
     ib = classify_ib(df_15min)
 
-    status = ib.get("status", "NO_DATA_TODAY")
+    status   = ib.get("status", "NO_DATA_TODAY")
     day_type = ib.get("day_type", "UNKNOWN")
 
     if status in ("PRE_MARKET", "IB_FORMING", "NO_DATA_TODAY"):
@@ -48,7 +48,6 @@ def get_market_profile() -> dict:
             "ib": ib,
         }
 
-    # NEUTRAL or UNKNOWN → mandatory skip
     return {
         "day_type": day_type,
         "authorized": False,

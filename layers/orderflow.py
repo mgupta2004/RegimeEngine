@@ -4,9 +4,10 @@ Uses KiteTicker to accumulate Cumulative Volume Delta (CVD) over a 15-minute
 rolling window. Designed to run as a background monitor during market hours
 (10:15–13:00 for primary window).
 
-Call snapshot() to get a point-in-time read for the signal engine.
-Call monitor(duration_seconds) to stream ticks for a fixed period.
+Call get_orderflow() to get a point-in-time read for the signal engine.
+Call start_monitoring() / stop_monitoring() to manage the ticker lifecycle.
 """
+from __future__ import annotations
 import os
 import threading
 import time
@@ -14,24 +15,20 @@ from collections import deque
 from datetime import datetime, timedelta
 
 import pytz
-from kiteconnect import KiteConnect, KiteTicker
-from dotenv import load_dotenv
+from kiteconnect import KiteTicker
+from data.kite_client import get_kite, get_instruments
 
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+IST = pytz.timezone("Asia/Kolkata")
 
 API_KEY      = os.environ.get("KITE_API_KEY", "")
 ACCESS_TOKEN = os.environ.get("KITE_ACCESS_TOKEN", "")
 
-IST = pytz.timezone("Asia/Kolkata")
 
 def _resolve_nifty_futures_token() -> int:
     """Return instrument token for the nearest Nifty futures contract."""
     from datetime import date
-    kite_tmp = KiteConnect(api_key=API_KEY)
-    kite_tmp.set_access_token(ACCESS_TOKEN)
-    instruments = kite_tmp.instruments("NFO")
     futures = [
-        i for i in instruments
+        i for i in get_instruments("NFO")
         if i["name"] == "NIFTY"
         and i["instrument_type"] == "FUT"
         and i["expiry"] >= date.today()
@@ -43,40 +40,37 @@ def _resolve_nifty_futures_token() -> int:
     print(f"[Orderflow] Nifty futures token: {token}  ({futures[0]['tradingsymbol']})")
     return token
 
+
 # ── Tick State ────────────────────────────────────────────────────────────────
+
 class OrderflowState:
     def __init__(self, window_minutes: int = 15):
-        self.window = timedelta(minutes=window_minutes)
-        # Each entry: (timestamp, delta_volume, direction)
-        # direction: +1 = buy tick (uptick), -1 = sell tick (downtick)
-        self._ticks: deque = deque()
-        self._lock = threading.Lock()
-        self.spot = 0.0
-        self.poc  = 0.0   # Point of Control (price level with most volume today)
-        self._last_price = 0.0  # for uptick/downtick rule
+        self.window         = timedelta(minutes=window_minutes)
+        self._ticks: deque  = deque()
+        self._lock          = threading.Lock()
+        self.spot           = 0.0
+        self.poc            = 0.0
+        self._last_price    = 0.0
         self._last_direction = 1
 
     def on_tick(self, tick: dict):
-        ts = datetime.now(IST)
+        ts    = datetime.now(IST)
         price = tick.get("last_price", 0)
         qty   = tick.get("last_quantity", 0)
 
-        # Uptick/downtick rule: compare to previous traded price
-        # buy_quantity/sell_quantity are order book depth — not aggressor side
         if price > self._last_price:
             direction = 1
         elif price < self._last_price:
             direction = -1
         else:
-            direction = self._last_direction  # tick rule: carry forward
+            direction = self._last_direction
 
-        self._last_price = price
+        self._last_price     = price
         self._last_direction = direction
 
         with self._lock:
             self._ticks.append((ts, qty * direction, direction))
             self.spot = price
-            # Prune ticks outside the rolling window
             cutoff = ts - self.window
             while self._ticks and self._ticks[0][0] < cutoff:
                 self._ticks.popleft()
@@ -87,16 +81,11 @@ class OrderflowState:
 
         if not ticks:
             return {
-                "cvd_velocity": 0,
-                "cvd_surge": False,
-                "buy_volume": 0,
-                "sell_volume": 0,
-                "imbalance_ratio": 1.0,
-                "imbalance_3to1": False,
-                "cvd_consistency": 0.0,
-                "cvd_sustained": False,
-                "spot": self.spot,
-                "spot_vs_poc": "UNKNOWN",
+                "cvd_velocity": 0, "cvd_surge": False,
+                "buy_volume": 0, "sell_volume": 0,
+                "imbalance_ratio": 1.0, "imbalance_3to1": False,
+                "cvd_consistency": 0.0, "cvd_sustained": False,
+                "spot": self.spot, "spot_vs_poc": "UNKNOWN",
                 "score": 0.0,
             }
 
@@ -105,30 +94,25 @@ class OrderflowState:
         sell_volume  = abs(sum(d for _, d, direction in ticks if direction < 0))
 
         imbalance_ratio = (buy_volume / sell_volume) if sell_volume > 0 else float("inf")
-        imbalance_3to1  = imbalance_ratio >= 3.0 or (1 / imbalance_ratio) >= 3.0
+        imbalance_3to1  = imbalance_ratio >= 3.0 or (1 / imbalance_ratio if imbalance_ratio else 0) >= 3.0
 
-        dominant = 1 if cvd_velocity >= 0 else -1
-        consistent_count = sum(1 for _, _, direction in ticks if direction == dominant)
-        cvd_consistency = consistent_count / len(ticks) if ticks else 0.0
-        cvd_sustained = cvd_consistency > 0.60
-
-        cvd_surge = abs(cvd_velocity) >= 30_000
+        dominant        = 1 if cvd_velocity >= 0 else -1
+        consistent_cnt  = sum(1 for _, _, d in ticks if d == dominant)
+        cvd_consistency = consistent_cnt / len(ticks)
+        cvd_sustained   = cvd_consistency > 0.60
+        cvd_surge       = abs(cvd_velocity) >= 30_000
 
         spot_vs_poc = "UNKNOWN"
         if self.poc:
             spot_vs_poc = "ABOVE" if self.spot > self.poc else "BELOW"
 
-        # Score
         score = 0.0
-        if cvd_surge:
-            score += 1.0
-        elif imbalance_3to1:
+        if cvd_surge or imbalance_3to1:
             score += 1.0
         if cvd_sustained:
             score += 0.5
         if spot_vs_poc == "ABOVE":
             score += 0.5
-        # Cap score per spec max of 1.0 for Layer 3 trigger
         score = min(score, 1.0)
 
         return {
@@ -146,10 +130,9 @@ class OrderflowState:
         }
 
 
-# Singleton state shared between ticker callbacks and signal engine
-_state = OrderflowState(window_minutes=15)
-_ticker = None  # type: KiteTicker
-_nifty_token = None  # resolved at start_ticker time
+_state   = OrderflowState(window_minutes=15)
+_ticker: KiteTicker | None = None
+_nifty_token: int | None   = None
 
 
 def _start_ticker():
@@ -176,7 +159,7 @@ def _start_ticker():
 
 
 def start_monitoring(poc_level: float = 0.0):
-    """Start background tick collection. Call once before market opens."""
+    """Start background tick collection. Call once at 09:10 from morning_monitor."""
     _state.poc = poc_level
     _start_ticker()
     print("[Orderflow] Ticker started. Collecting ticks...")
@@ -189,8 +172,8 @@ def stop_monitoring():
 
 
 def get_orderflow(poc_level: float = 0.0) -> dict:
-    """
-    Point-in-time orderflow snapshot for signal_engine.py.
+    """Point-in-time orderflow snapshot for signal_engine.
+
     If ticker is not running, starts a 60-second warm-up collection.
     """
     global _ticker

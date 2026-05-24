@@ -2,4 +2,5 @@
 __pycache__/
 *.pyc
 open_trade.json
+state/*.json
 /tmp/
